@@ -13,10 +13,12 @@
 #include "builtin/Array.h"                // js::NewDenseFullyAllocatedArray
 #include "builtin/Promise.h"              // js::RejectPromiseWithPendingError
 #include "builtin/streams/PipeToState.h"  // js::PipeToState
+#include "builtin/streams/ReadableByteStreamControllerOperations.h"  // js::SetUpReadableByteStreamController
 #include "builtin/streams/ReadableStream.h"  // js::ReadableStream
 #include "builtin/streams/ReadableStreamController.h"  // js::ReadableStream{,Default}Controller
 #include "builtin/streams/ReadableStreamDefaultControllerOperations.h"  // js::ReadableStreamDefaultController{Close,Enqueue}, js::ReadableStreamControllerError, js::SourceAlgorithms
 #include "builtin/streams/ReadableStreamInternals.h"  // js::ReadableStreamCancel
+#include "builtin/streams/ReadableStreamOperations.h"  // js::ReadableStreamTee_Pull, js::SetUpReadableByteStreamController
 #include "builtin/streams/ReadableStreamReader.h"  // js::CreateReadableStreamDefaultReader, js::ForAuthorCodeBool, js::ReadableStream{,Default}Reader, js::ReadableStreamReaderGenericRead
 #include "builtin/streams/TeeState.h"              // js::TeeState
 #include "js/CallAndConstruct.h"                   // JS::IsCallable
@@ -42,10 +44,13 @@ using js::NewHandler;
 using js::NewObjectWithClassProto;
 using js::PromiseObject;
 using js::ReadableStream;
+using js::ReadableStreamController;
+using js::ReadableByteStreamController;
 using js::ReadableStreamDefaultController;
 using js::ReadableStreamDefaultControllerEnqueue;
 using js::ReadableStreamDefaultReader;
 using js::ReadableStreamReader;
+using js::SetUpReadableByteStreamController;
 using js::SourceAlgorithms;
 using js::TargetFromHandler;
 using js::TeeState;
@@ -117,10 +122,36 @@ using JS::Value;
   return stream;
 }
 
-// Streams spec, 3.4.4. CreateReadableByteStream (
-//                          startAlgorithm, pullAlgorithm, cancelAlgorithm
-//                          [, highWaterMark [, autoAllocateChunkSize ] ] )
-// Not implemented.
+/**
+ * https://streams.spec.whatwg.org/#abstract-opdef-createreadablebytestream
+ */
+[[nodiscard]] static ReadableStream* CreateReadableByteStream(
+    JSContext* cx, SourceAlgorithms sourceAlgorithms,
+    Handle<Value> underlyingSource,
+    Handle<Value> pullMethod = UndefinedHandleValue,
+    Handle<Value> cancelMethod = UndefinedHandleValue,
+    Handle<JSObject*> proto = nullptr) {
+  // Let stream be a new ReadableStream.
+  // Perform ! InitializeReadableStream(stream).
+  Rooted<ReadableStream*> stream(cx,
+                                 ReadableStream::create(cx, nullptr, proto));
+  if (!stream) {
+    return nullptr;
+  }
+
+  // Let controller be a new ReadableByteStreamController.
+
+  // Perform ? SetUpReadableByteStreamController(stream, controller,
+  // startAlgorithm, pullAlgorithm, cancelAlgorithm, 0, undefined).
+  if (!SetUpReadableByteStreamController(cx, stream, sourceAlgorithms,
+                                         underlyingSource, pullMethod,
+                                         cancelMethod, 0, 0)) {
+    return nullptr;
+  }
+
+  // Return stream.
+  return stream;
+}
 
 /**
  * Streams spec, 3.4.5. InitializeReadableStream ( stream )
@@ -276,7 +307,7 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
              "support for cloneForBranch2=true is not yet implemented");
   auto& value2 = value;
 
-  Rooted<ReadableStreamDefaultController*> unwrappedController(cx);
+  Rooted<ReadableStreamController*> unwrappedController(cx);
 
   // Step 12.c.ix: If canceled1 is false, perform
   //               ? ReadableStreamDefaultControllerEnqueue(
@@ -386,13 +417,18 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
 /**
  * Cancel one branch of a tee'd stream with the given |reason_|.
  *
- * Streams spec, 3.4.10. ReadableStreamTee steps 13 and 14: "Let
- * cancel1Algorithm/cancel2Algorithm be the following steps, taking a reason
- * argument:"
+ * https://streams.spec.whatwg.org/#abstract-opdef-readablestreamdefaulttee
+ * Let cancel1Algorithm be the following steps, taking a reason argument:
+ * ...
+ * Let cancel2Algorithm be the following steps, taking a reason argument:
+ * ...
+ * 
+ * AND
+ * https://streams.spec.whatwg.org/#abstract-opdef-readablebytestreamtee
  */
 [[nodiscard]] JSObject* js::ReadableStreamTee_Cancel(
     JSContext* cx, JS::Handle<TeeState*> unwrappedTeeState,
-    JS::Handle<ReadableStreamDefaultController*> unwrappedBranch,
+    JS::Handle<ReadableStreamController*> unwrappedBranch,
     JS::Handle<Value> reason) {
   Rooted<ReadableStream*> unwrappedStream(
       cx, UnwrapInternalSlot<ReadableStream>(cx, unwrappedTeeState,
@@ -403,8 +439,8 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
 
   bool bothBranchesCanceled = false;
 
-  // Step 13/14.a: Set canceled1/canceled2 to true.
-  // Step 13/14.b: Set reason1/reason2 to reason.
+  // Set canceled1/2 to true.
+  // Set reason1/2 to reason.
   {
     AutoRealm ar(cx, unwrappedTeeState);
 
@@ -427,10 +463,9 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
       cx, unwrappedTeeState->cancelPromise());
   MOZ_ASSERT(unwrappedCancelPromise != nullptr);
 
-  // Step 13/14.c: If canceled2/canceled1 is true,
+  // If canceled2/1 is true,
   if (bothBranchesCanceled) {
-    // Step 13/14.c.i: Let compositeReason be
-    //                 ! CreateArrayFromList(« reason1, reason2 »).
+    // Let compositeReason be ! CreateArrayFromList(« reason1, reason2 »).
     Rooted<Value> compositeReason(cx);
     {
       Rooted<Value> reason1(cx, unwrappedTeeState->reason1());
@@ -451,8 +486,8 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
       compositeReason = ObjectValue(*reasonArray);
     }
 
-    // Step 13/14.c.ii: Let cancelResult be
-    //                  ! ReadableStreamCancel(stream, compositeReason).
+    // Let cancelResult be ! ReadableStreamCancel(stream, compositeReason).
+    //
     // In our implementation, this can fail with OOM. The best course then
     // is to reject cancelPromise with an OOM error.
     Rooted<JSObject*> cancelResult(
@@ -464,7 +499,7 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
         return nullptr;
       }
     } else {
-      // Step 13/14.c.iii: Resolve cancelPromise with cancelResult.
+      // Resolve cancelPromise with cancelResult.
       Rooted<Value> cancelResultVal(cx, ObjectValue(*cancelResult));
       if (!ResolveUnwrappedPromiseWithValue(cx, unwrappedCancelPromise,
                                             cancelResultVal)) {
@@ -473,7 +508,7 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
     }
   }
 
-  // Step 13/14.d: Return cancelPromise.
+  // Return cancelPromise.
   Rooted<JSObject*> cancelPromise(cx, unwrappedCancelPromise);
   if (!cx->compartment()->wrap(cx, &cancelPromise)) {
     return nullptr;
@@ -483,11 +518,14 @@ static bool TeeReaderReadHandler(JSContext* cx, unsigned argc, Value* vp) {
 }
 
 /*
- * https://streams.spec.whatwg.org/#readable-stream-tee
- * ReadableStreamTee(stream, cloneForBranch2)
- *
- * Step 18: Upon rejection of reader.[[closedPromise]] with reason r,
+ * https://streams.spec.whatwg.org/#abstract-opdef-readablestreamdefaulttee
+ *   Upon rejection of reader.[[closedPromise]] with reason r,
+ * AND
+ * https://streams.spec.whatwg.org/#abstract-opdef-readablebytestreamtee
+ *   Let forwardReaderError be the following steps, taking a thisReader
+ * argument: Upon rejection of thisReader.[[closedPromise]] with reason r,
  */
+
 static bool TeeReaderErroredHandler(JSContext* cx, unsigned argc,
                                     JS::Value* vp) {
   CallArgs args = CallArgsFromVp(argc, vp);
@@ -495,26 +533,22 @@ static bool TeeReaderErroredHandler(JSContext* cx, unsigned argc,
   Rooted<TeeState*> teeState(cx, TargetFromHandler<TeeState>(args));
   Handle<Value> reason = args.get(0);
 
-  Rooted<ReadableStreamDefaultController*> unwrappedBranchController(cx);
+  Rooted<ReadableStreamController*> unwrappedBranchController(cx);
 
-  // Step 18.1: Perform
-  //               ! ReadableStreamDefaultControllerError(
-  //                   branch1.[[controller]], r).
+  // Perform ! ReadableStreamDefaultControllerError(branch1.[[controller]], r).
   unwrappedBranchController = teeState->branch1();
   if (!ReadableStreamControllerError(cx, unwrappedBranchController, reason)) {
     return false;
   }
 
-  // Step 18.2: Perform
-  //            ! ReadableStreamDefaultControllerError(
-  //                branch2.[[controller]], r).
+  // Perform ! ReadableStreamDefaultControllerError(branch2.[[controller]], r).
   unwrappedBranchController = teeState->branch2();
   if (!ReadableStreamControllerError(cx, unwrappedBranchController, reason)) {
     return false;
   }
 
-  // Step 18.3: If canceled1 is false or canceled2 is false,
-  //            resolve cancelPromise with undefined.
+  // If canceled1 is false or canceled2 is false, resolve cancelPromise with
+  // undefined.
   if (!teeState->canceled1() || !teeState->canceled2()) {
     Rooted<PromiseObject*> unwrappedCancelPromise(cx,
                                                   teeState->cancelPromise());
@@ -530,15 +564,17 @@ static bool TeeReaderErroredHandler(JSContext* cx, unsigned argc,
 }
 
 /**
- * Streams spec, 3.4.10. ReadableStreamTee ( stream, cloneForBranch2 )
+ * https://streams.spec.whatwg.org/#abstract-opdef-readablestreamdefaulttee
+ * AND
+ * https://streams.spec.whatwg.org/#abstract-opdef-readablebytestreamtee
  */
 [[nodiscard]] bool js::ReadableStreamTee(
     JSContext* cx, JS::Handle<ReadableStream*> unwrappedStream,
     bool cloneForBranch2, JS::MutableHandle<ReadableStream*> branch1Stream,
     JS::MutableHandle<ReadableStream*> branch2Stream) {
-  // Step 1: Assert: ! IsReadableStream(stream) is true (implicit).
+  // Assert: stream implements ReadableStream. (implicit)
 
-  // Step 2: Assert: Type(cloneForBranch2) is Boolean (implicit).
+  // Assert: cloneForBranch2 is a boolean. (implicit)
   //
   // The streams spec only ever passes |cloneForBranch2 = false|.  It's expected
   // that external specs that pass |cloneForBranch2 = true| will at some point
@@ -546,7 +582,11 @@ static bool TeeReaderErroredHandler(JSContext* cx, unsigned argc,
   MOZ_ASSERT(!cloneForBranch2,
              "support for cloneForBranch2=true is not yet implemented");
 
-  // Step 3: Let reader be ? AcquireReadableStreamDefaultReader(stream).
+  // If stream.[[controller]] implements ReadableByteStreamController, return ?
+  // ReadableByteStreamTee(stream). Return ? ReadableStreamDefaultTee(stream,
+  // cloneForBranch2). (both paths inlined with branching below)
+
+  // Let reader be ? AcquireReadableStreamDefaultReader(stream).
   Rooted<ReadableStreamDefaultReader*> reader(
       cx, CreateReadableStreamDefaultReader(cx, unwrappedStream,
                                             ForAuthorCodeBool::No));
@@ -558,15 +598,16 @@ static bool TeeReaderErroredHandler(JSContext* cx, unsigned argc,
   // steps, so we allocate them in an object, the TeeState. The algorithms
   // also close over `stream` and `reader`, so TeeState gets a reference to
   // the stream.
-  //
-  // Step 4: Let reading be false.
-  // Step 5: Let canceled1 be false.
-  // Step 6: Let canceled2 be false.
-  // Step 7: Let reason1 be undefined.
-  // Step 8: Let reason2 be undefined.
-  // Step 9: Let branch1 be undefined.
-  // Step 10: Let branch2 be undefined.
-  // Step 11: Let cancelPromise be a new promise.
+
+  // Let reading be false.
+  // Let readAgainForBranch1 be false. (byob)
+  // Let readAgainForBranch2 be false. (byob)
+  // Let canceled1 be false.
+  // Let canceled2 be false.
+  // Let reason1 be undefined.
+  // Let reason2 be undefined.
+  // Let branch1 be undefined.
+  // Let branch2 be undefined.
   Rooted<TeeState*> teeState(cx, TeeState::create(cx, unwrappedStream));
   if (!teeState) {
     return false;
@@ -576,60 +617,89 @@ static bool TeeReaderErroredHandler(JSContext* cx, unsigned argc,
   MOZ_ASSERT(!teeState->canceled1());
   MOZ_ASSERT(!teeState->canceled2());
 
-  // Step 12: Let pullAlgorithm be the following steps: [...]
-  // Step 13: Let cancel1Algorithm be the following steps: [...]
-  // Step 14: Let cancel2Algorithm be the following steps: [...]
-  // Step 15: Let startAlgorithm be an algorithm that returns undefined.
-  //
+  // ... Algorithm definitions ...
   // Implicit. Our implementation does not use objects to represent
   // [[pullAlgorithm]], [[cancelAlgorithm]], and so on. Instead, we decide
   // which one to perform based on class checks. For example, our
   // implementation of ReadableStreamControllerCallPullIfNeeded checks
   // whether the stream's underlyingSource is a TeeState object.
 
-  // Step 16: Set branch1 to
-  //          ! CreateReadableStream(startAlgorithm, pullAlgorithm,
-  //                                 cancel1Algorithm).
-  Rooted<Value> underlyingSource(cx, ObjectValue(*teeState));
-  branch1Stream.set(
-      CreateReadableStream(cx, SourceAlgorithms::Tee, underlyingSource));
-  if (!branch1Stream) {
-    return false;
+  if (unwrappedStream->controller()->is<ReadableStreamDefaultController>()) {
+    // Set branch1 to ! CreateReadableStream(startAlgorithm, pullAlgorithm,
+    // cancel1Algorithm).
+    Rooted<Value> underlyingSource(cx, ObjectValue(*teeState));
+    branch1Stream.set(
+        CreateReadableStream(cx, SourceAlgorithms::Tee, underlyingSource));
+    if (!branch1Stream) {
+      return false;
+    }
+
+    Rooted<ReadableStreamDefaultController*> branch1(cx);
+    branch1 =
+        &branch1Stream->controller()->as<ReadableStreamDefaultController>();
+    branch1->setTeeBranch1();
+    teeState->setBranch1(branch1);
+
+    // Set branch2 to ! CreateReadableStream(startAlgorithm, pullAlgorithm,
+    // cancel2Algorithm).
+    branch2Stream.set(
+        CreateReadableStream(cx, SourceAlgorithms::Tee, underlyingSource));
+    if (!branch2Stream) {
+      return false;
+    }
+
+    Rooted<ReadableStreamDefaultController*> branch2(cx);
+    branch2 =
+        &branch2Stream->controller()->as<ReadableStreamDefaultController>();
+    branch2->setTeeBranch2();
+    teeState->setBranch2(branch2);
+  } else {
+    MOZ_ASSERT(
+        unwrappedStream->controller()->is<ReadableByteStreamController>());
+
+    // Set branch1 to ! CreateReadableByteStream(startAlgorithm, pull1Algorithm,
+    // cancel1Algorithm).
+    Rooted<Value> underlyingSource(cx, ObjectValue(*teeState));
+    branch1Stream.set(
+        CreateReadableByteStream(cx, SourceAlgorithms::Tee, underlyingSource));
+    if (!branch1Stream) {
+      return false;
+    }
+
+    Rooted<ReadableByteStreamController*> branch1(cx);
+    branch1 = &branch1Stream->controller()->as<ReadableByteStreamController>();
+    branch1->setTeeBranch1();
+    teeState->setBranch1(branch1);
+
+    // Set branch2 to ! CreateReadableByteStream(startAlgorithm, pull2Algorithm,
+    // cancel2Algorithm).
+    branch2Stream.set(
+        CreateReadableByteStream(cx, SourceAlgorithms::Tee, underlyingSource));
+    if (!branch2Stream) {
+      return false;
+    }
+
+    Rooted<ReadableByteStreamController*> branch2(cx);
+    branch2 = &branch2Stream->controller()->as<ReadableByteStreamController>();
+    branch2->setTeeBranch2();
+    teeState->setBranch2(branch2);
   }
 
-  Rooted<ReadableStreamDefaultController*> branch1(cx);
-  branch1 = &branch1Stream->controller()->as<ReadableStreamDefaultController>();
-  branch1->setTeeBranch1();
-  teeState->setBranch1(branch1);
-
-  // Step 17: Set branch2 to
-  //          ! CreateReadableStream(startAlgorithm, pullAlgorithm,
-  //                                 cancel2Algorithm).
-  branch2Stream.set(
-      CreateReadableStream(cx, SourceAlgorithms::Tee, underlyingSource));
-  if (!branch2Stream) {
-    return false;
-  }
-
-  Rooted<ReadableStreamDefaultController*> branch2(cx);
-  branch2 = &branch2Stream->controller()->as<ReadableStreamDefaultController>();
-  branch2->setTeeBranch2();
-  teeState->setBranch2(branch2);
-
-  // Step 18: Upon rejection of reader.[[closedPromise]] with reason r, [...]
+  // Upon rejection of reader.[[closedPromise]] with reason r,
+  // AND
+  // Perform forwardReaderError, given reader.
+  //   Upon rejection of thisReader.[[closedPromise]] with reason r,
   Rooted<JSObject*> closedPromise(cx, reader->closedPromise());
-
   Rooted<JSObject*> onRejected(
       cx, NewHandler(cx, TeeReaderErroredHandler, teeState));
   if (!onRejected) {
     return false;
   }
-
   if (!JS::AddPromiseReactions(cx, closedPromise, nullptr, onRejected)) {
     return false;
   }
 
-  // Step 19: Return « branch1, branch2 ».
+  // Return « branch1, branch2 ».
   return true;
 }
 

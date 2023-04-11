@@ -27,7 +27,7 @@ class WritableStream;
 
 [[nodiscard]] extern JSObject* ReadableStreamTee_Cancel(
     JSContext* cx, JS::Handle<TeeState*> unwrappedTeeState,
-    JS::Handle<ReadableStreamDefaultController*> unwrappedBranch,
+    JS::Handle<ReadableStreamController*> unwrappedBranch,
     JS::Handle<JS::Value> reason);
 
 [[nodiscard]] extern bool ReadableStreamTee(

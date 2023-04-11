@@ -303,8 +303,8 @@ static const JSFunctionSpec ReadableStreamDefaultController_methods[] = {
     JS_FN("enqueue", ReadableStreamDefaultController_enqueue, 1, 0),
     JS_FN("error", ReadableStreamDefaultController_error, 1, 0), JS_FS_END};
 
-JS_STREAMS_CLASS_SPEC(ReadableStreamDefaultController, 0, SlotCount,
-                      0, 0, JS_NULL_CLASS_OPS);
+JS_STREAMS_CLASS_SPEC(ReadableStreamDefaultController, 0, SlotCount, 0, 0,
+                      JS_NULL_CLASS_OPS);
 
 /**
  * Unified implementation of ReadableStream controllers' [[CancelSteps]]
@@ -360,10 +360,10 @@ JS_STREAMS_CLASS_SPEC(ReadableStreamDefaultController, 0, SlotCount,
                "the TeeState object");
     Rooted<TeeState*> unwrappedTeeState(
         cx, &unwrappedUnderlyingSource.toObject().as<TeeState>());
-    Rooted<ReadableStreamDefaultController*> unwrappedDefaultController(
-        cx, &unwrappedController->as<ReadableStreamDefaultController>());
+    Rooted<ReadableStreamController*> unwrappedController(
+        cx, &unwrappedController->as<ReadableStreamController>());
     result = ReadableStreamTee_Cancel(cx, unwrappedTeeState,
-                                      unwrappedDefaultController, reason);
+                                      unwrappedController, reason);
   } else if (unwrappedController->hasExternalSource()) {
     // An embedding-provided cancel algorithm.
     Rooted<Value> rval(cx);

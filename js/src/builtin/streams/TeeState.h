@@ -120,28 +120,28 @@ class TeeState : public NativeObject {
     return &getFixedSlot(Slot_CancelPromise).toObject().as<PromiseObject>();
   }
 
-  ReadableStreamDefaultController* branch1() {
-    ReadableStreamDefaultController* controller =
+  ReadableStreamController* branch1() {
+    ReadableStreamController* controller =
         &getFixedSlot(Slot_Branch1)
              .toObject()
-             .as<ReadableStreamDefaultController>();
+             .as<ReadableStreamController>();
     MOZ_ASSERT(controller->isTeeBranch1());
     return controller;
   }
-  void setBranch1(ReadableStreamDefaultController* controller) {
+  void setBranch1(ReadableStreamController* controller) {
     MOZ_ASSERT(controller->isTeeBranch1());
     setFixedSlot(Slot_Branch1, JS::ObjectValue(*controller));
   }
 
-  ReadableStreamDefaultController* branch2() {
-    ReadableStreamDefaultController* controller =
+  ReadableStreamController* branch2() {
+    ReadableStreamController* controller =
         &getFixedSlot(Slot_Branch2)
              .toObject()
-             .as<ReadableStreamDefaultController>();
+             .as<ReadableStreamController>();
     MOZ_ASSERT(controller->isTeeBranch2());
     return controller;
   }
-  void setBranch2(ReadableStreamDefaultController* controller) {
+  void setBranch2(ReadableStreamController* controller) {
     MOZ_ASSERT(controller->isTeeBranch2());
     setFixedSlot(Slot_Branch2, JS::ObjectValue(*controller));
   }
